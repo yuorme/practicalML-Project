@@ -1,0 +1,157 @@
+---
+title: "Practical Machine Learning - Course Project"
+author: "David Yu"
+output: html_document
+---
+
+```{r, echo=FALSE}
+setwd("~/coursera/lectures/8-MachineLearning/Project")
+time <- Sys.time()
+```
+last compiled: `r time`
+
+###Data Collection and Feature Selection
+
+#####Activity Monitoring
+
+Six participants between the ages of 20-28 were asked to perform one set of 10 repetitions the Unilateral Dumbbell Biceps Curl in one of five different ways:  
+- **Class A** - exactly according to the specification  
+- **Class B** - throwing the elbows to the front  
+- **Class C** - lifting the dumbbell only halfway  
+- **Class D** - lowering the dumbbell only halfway  
+- **Class E** - throwing the hips to the front (Class E)  
+
+Activity data was recorded using four Razor inertial measurement units (IMU) mounted in the particpant's glove, armband, lumbar belt, and dumbbell. Each Razor IMU possesses a tri-axial accelerometer, gyroscope, and magenetometer with a joint sampling rate of 45 Hz.
+
+#####Feature Selection
+
+The researchers then used a sliding window approach to carry out further analyses. In each step of the sliding window they calculated features on the Euler angles (roll, pitch and yaw), as well as the raw accelerometer, gyroscope and magnetometer readings. For the Euler angles of each of the four sensors they calculated eight features: mean, variance, standard deviation, max, min, amplitude, kurtosis and skewness, generating in total 96 derived feature sets. Finally, an automated feature selection algorithm ("Best First" strategy) was used to extract 17 features for subsequent use.   
+    
+For more information, refer to the group's [website](http://groupware.les.inf.puc-rio.br/har) and the following [academic publication](http://groupware.les.inf.puc-rio.br/public/papers/2013.Velloso.QAR-WLE.pdf)
+
+### Data Processing
+
+Data were downloaded from the Course Project website. After examining the test dataset, it became apparent that the 20 test data points could not be analyzed using a sliding window approach as they comprised individual measurements. As a result, I decided to remove all columns containing summary measures that were calculated using the sliding window approach (e.x. kurtosis/skewness/variance/average of measurements over a given window). Rows corresponding to sliding window calculations in the training dataset (new_window=yes) were also removed. This reduced the number of observations to 19,216 and the number of features to 60.
+
+```{r loadData}
+QARtest <- read.csv("pml-testing.csv", header=TRUE, na.strings=c("#DIV/0!", NA))
+QAR <- read.csv("pml-training.csv", header=TRUE, na.strings=c("#DIV/0!", NA))
+
+# remove rows where new_window = yes as none are present in test data
+QAR <- QAR[QAR$new_window == "no", ]
+
+# str output truncated by default for >99 items. Use following code to display
+# str(QAR, list.len=200)
+
+#remove columns with NA values from both train and test datasets
+removeCol <- c(12:36, 50:59, 69:83, 87:101, 103:112, 125:139, 141:150)
+QAR <- QAR[ ,-removeCol]  
+QARtest <- QARtest[ ,-removeCol]  
+```
+
+###Holdout Cross-Validation
+
+Since the processed dataset was still relatively large (>19,000 observations), I decided to reserve 25% of the supplied training set for holdout cross-validation. This was done by partitioning within each 'classe' variable to preserve the overall distribution of the outcome variable.
+
+```{r dataPartition, message=FALSE, warning=FALSE}
+require(caret)
+
+#generate training and test datasets
+set.seed(12345)
+inTrain <- createDataPartition(y=QAR$classe, p=0.75, list=FALSE)
+training <- QAR[inTrain, ]
+testing <- QAR[-inTrain, ]
+```
+
+### Random Forest Model Training
+
+The Random Forest method was used to fit a model using all of the raw features remaining in our training dataset except those containing metadata related to the measurements. Removal of the metadata was done to prevent over-fitting of the final test dataset. Training controls for the Random Forest generations were set to use 10-fold cross-validation. The `foreach` and `doParallel` libraries were loaded to allow for parallel computation of the cross-validation replicates.
+
+```{r trainRF, cache=TRUE}
+#initialize parallel processing
+require(foreach)
+require(doParallel)
+cl <- makeCluster(6) #use 6 of 8 cores
+registerDoParallel(cl)
+
+#setup cross-validation and other training controls
+tc <- trainControl(method = "cv", 
+                   number = 10, 
+                   seeds = NA, 
+                   allowParallel = TRUE) 
+
+#remove measurement/user/timestamp/window metadata to prevent overfitting
+set.seed(12345)
+QARrf <- train(classe  ~ . -X -cvtd_timestamp -user_name -raw_timestamp_part_1 -raw_timestamp_part_2 -new_window -num_window, data=training, method="rf", trControl = trainControl())
+```
+
+### Evaluating Model Fit
+
+The following displays a summary of the final model with the Random Forest estimate of the out-of-bag (OOB) error rate (0.69%). 
+
+```{r eval1, results=}
+# print summary of the final model
+QARrf$finalModel
+```
+
+The OOB error rate is an estimate of the out-of-sample error rate calculated by the Random Forest algorithm. The authors of Random Forest claim that the OOB error rate is an unbiased estimator of test set error and no further cross-validation is required [see Ref](https://www.stat.berkeley.edu/~breiman/RandomForests/cc_home.htm#ooberr). That said, I'm an inherently skeptical person and will cross-reference the estimated OOB error rate with the actual error rate derived from our holdout cross-validation dataset.
+
+```{r eval2}
+confusionMatrix(
+    predict(QARrf, newdata=testing), # predicted outcomes
+    testing$classe                   # actual outcomes    
+)
+```
+
+As shown above, the prediction accuracy of the model on the holdout cross-validation set was 99.31%. This means that the error rate on the holdout dataset is 0.69% which is equivalent to the estimated OOB error rate of 0.69%. It appears that in this case, 
+
+### Generate Predictions on QARtest Dataset
+
+Given the high accuracy and consistent out-of-sample error rates of our Random Forest model, I decided to generate predictions on the final testing dataset. The resulting predictions were accurate for all 20 of the required test cases.
+
+```{r finalTest, eval=FALSE}
+#predict QARtest
+QARpredict <- predict(QARrf, newdata=QARtest)
+QARpredict
+
+#course-supplied function for generating .txt files containing individual predictions
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+
+pml_write_files(QARpredict)
+```
+`r QARpredict`
+
+
+```{r rfcv, echo=FALSE, eval=FALSE}
+
+# generate a list of seeds for the parallel runs
+# set.seed(12345)
+# seedList <- vector(mode = "list", length = 11)
+# for(i in 1:11) seedList[[i]] <- sample.int(1000, 1)
+
+QARrfcv <- rfcv(training[ ,8:59], training[ ,60], cv.fold=6, recursive=FALSE)
+```
+
+```{r errorRatePlot, echo=FALSE, eval=FALSE}
+qplot(QARrf.cv$finalModel$err.rate)
+```
+
+```{r explorePlot, eval=FALSE, echo=FALSE}
+### Exploratory Analyses###
+
+#roll, pitch, yaw, and total accel for the belt and arm sensors
+featurePlot(x=trainQAR[ ,c(8:11, 21:24)], y=training$class, plot="pairs")
+
+#roll, pitch, yaw, and total accel for the dumbbell and glove sensors
+featurePlot(x=training[ ,c(34:37, 47:50)], y=training$class, plot="pairs")
+
+#username, time and window
+featurePlot(x=training[ ,c(2, 5, 7)], y=training$class, plot="pairs")
+```
+
